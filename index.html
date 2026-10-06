@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ink Runner</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0B0A12; --panel:#15131F; --line:#2A2638;
+    --violet:#7C5CFF; --violet-dim:#4A3A9E;
+    --fg:#F2F1F5; --muted:#9A96B0; --green:#4ADE80; --red:#FF6B6B;
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    display:flex; justify-content:center; padding:20px 14px 44px;
+  }
+  .wrap{width:100%; max-width:860px}
+  header{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; flex-wrap:wrap}
+  h1{font-size:1.4rem; margin:0; letter-spacing:-.5px}
+  h1 span{color:var(--violet)}
+  button{
+    font:inherit; font-weight:700; cursor:pointer; border:none; border-radius:10px;
+    padding:11px 18px; background:var(--violet); color:#fff;
+  }
+  button:disabled{opacity:.45; cursor:not-allowed}
+  button.ghost{background:transparent; border:1px solid var(--line); color:var(--fg)}
+  .stage{position:relative; border:1px solid var(--line); border-radius:14px; overflow:hidden; background:#07060D}
+  canvas{display:block; width:100%; height:auto; touch-action:manipulation}
+  .overlay{
+    position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px; text-align:center;
+    background:rgba(7,6,13,.88); padding:20px;
+  }
+  .overlay.hidden{display:none}
+  .overlay h2{margin:0; font-size:1.5rem}
+  .overlay p{margin:0; color:var(--muted); font-size:.9rem; line-height:1.5; max-width:380px}
+  .row{display:flex; gap:12px; flex-wrap:wrap; justify-content:center}
+  .bar{display:flex; gap:18px; flex-wrap:wrap; margin:14px 0 20px; color:var(--muted); font-size:.85rem}
+  .bar b{color:var(--fg)}
+  table{width:100%; border-collapse:collapse; font-size:.88rem}
+  th,td{text-align:left; padding:9px 6px; border-bottom:1px solid var(--line)}
+  th{color:var(--muted); font-weight:400; font-size:.78rem; letter-spacing:.06em}
+  td.score{text-align:right; color:var(--violet); font-weight:700}
+  .me{background:rgba(124,92,255,.10)}
+  .note{color:var(--muted); font-size:.78rem; line-height:1.6; margin-top:18px}
+  .err{color:var(--red); font-size:.85rem; min-height:1.2em; margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>INK<span>RUNNER</span></h1>
+    <div class="row">
+      <button id="connect">Connect wallet</button>
+      <button id="play" class="ghost" disabled>Pay &amp; play</button>
+    </div>
+  </header>
+
+  <div class="bar">
+    <div>entry <b id="fee">—</b></div>
+    <div>pot <b id="pot">—</b></div>
+    <div>round <b id="round">—</b></div>
+    <div>ends in <b id="left">—</b></div>
+    <div>you can claim <b id="claimable">—</b></div>
+  </div>
+
+  <div class="stage">
+    <canvas id="cv" width="860" height="280"></canvas>
+    <div class="overlay" id="ov">
+      <h2 id="ovTitle">Ink Runner</h2>
+      <p id="ovText">Connect a wallet on Ink, pay the entry fee, and run. Space or tap to jump. Every jump you make is written onchain when the run ends.</p>
+      <div class="row"><button id="ovBtn" disabled>Connect wallet</button></div>
+    </div>
+  </div>
+
+  <div class="err" id="err"></div>
+
+  <h3 style="margin:26px 0 8px;font-size:1rem">Leaderboard — this round</h3>
+  <table>
+    <thead><tr><th>#</th><th>player</th><th style="text-align:right">score</th></tr></thead>
+    <tbody id="lb"><tr><td colspan="3" style="color:var(--muted)">connect to load</td></tr></tbody>
+  </table>
+
+  <div class="row" style="margin-top:16px;justify-content:flex-start">
+    <button id="claim" class="ghost" disabled>Claim winnings</button>
+    <button id="finalize" class="ghost" disabled>Finalize round</button>
+  </div>
+
+  <p class="note">
+    The whole pot is split between the top 10 of each round: 30 / 20 / 12 / 10 / 8 / 6 / 5 / 4 / 3 / 2 percent.
+    Nothing is taken out for the house. Anyone can call Finalize once the round timer hits zero.
+    Scores are submitted by the client, so treat this as a toy, not a tournament.
+  </p>
+
+</div>
+
+<script>
+// ----------------------------------------------------------------- chain setup
+const CHAIN_ID_HEX = "0xdef1";                 // 57073
+const CONTRACT = "0xeD70C59709334A8594325A72A773EBb75Dc42184";    // <-- paste after deploying
+const RPC = "https://rpc-gel.inkonchain.com";
+const EXPLORER = "https://explorer.inkonchain.com";
+
+const ABI = [
+  "function entryFee() view returns (uint256)",
+  "function pot() view returns (uint256)",
+  "function roundId() view returns (uint256)",
+  "function timeLeft() view returns (uint256)",
+  "function claimable(address) view returns (uint256)",
+  "function getLeaderboard() view returns (tuple(address player,uint32 score,uint256 runId)[10])",
+  "function startRun() payable returns (uint256,bytes32)",
+  "function submitScore(uint256 runId, uint32 score, uint16[] jumps)",
+  "function claim()",
+  "function finalizeRound()",
+  "event RunStarted(uint256 indexed runId, address indexed player, uint256 indexed round, bytes32 seed)"
+];
+
+let provider, signer, account, contract, readContract;
+
+const $ = (id) => document.getElementById(id);
+const fmt = (wei) => Number(ethers.formatEther(wei)).toFixed(5).replace(/0+$/,"").replace(/\.$/,"") + " ETH";
+const short = (a) => a.slice(0,6) + "…" + a.slice(-4);
+function showErr(m){ $("err").textContent = m || ""; }
+
+// --------------------------------------------------------------------- wallet
+async function connect(){
+  if(!window.ethereum){ showErr("No wallet found. Open this in a browser with a wallet extension, or in your wallet's in-app browser."); return; }
+  try{
+    provider = new ethers.BrowserProvider(window.ethereum);
+    await provider.send("eth_requestAccounts", []);
+    const net = await provider.getNetwork();
+    if(net.chainId !== 57073n){
+      try{
+        await window.ethereum.request({ method:"wallet_switchEthereumChain", params:[{ chainId: CHAIN_ID_HEX }] });
+      }catch(e){
+        if(e.code === 4902){
+          await window.ethereum.request({ method:"wallet_addEthereumChain", params:[{
+            chainId: CHAIN_ID_HEX, chainName:"Ink",
+            nativeCurrency:{ name:"Ether", symbol:"ETH", decimals:18 },
+            rpcUrls:[RPC], blockExplorerUrls:[EXPLORER]
+          }]});
+        } else { throw e; }
+      }
+      provider = new ethers.BrowserProvider(window.ethereum);
+    }
+    signer = await provider.getSigner();
+    account = await signer.getAddress();
+    contract = new ethers.Contract(CONTRACT, ABI, signer);
+    readContract = contract;
+    $("connect").textContent = short(account);
+    $("play").disabled = false;
+    $("ovBtn").disabled = false;
+    $("ovBtn").textContent = "Pay & play";
+    showErr("");
+    await refresh();
+    setInterval(refresh, 15000);
+  }catch(e){ showErr(e.shortMessage || e.message); }
+}
+
+async function refresh(){
+  if(!readContract) return;
+  try{
+    const [fee, pot, round, left, cl, lb] = await Promise.all([
+      readContract.entryFee(), readContract.pot(), readContract.roundId(),
+      readContract.timeLeft(), readContract.claimable(account), readContract.getLeaderboard()
+    ]);
+    $("fee").textContent = fmt(fee);
+    $("pot").textContent = fmt(pot);
+    $("round").textContent = "#" + round.toString();
+    const s = Number(left);
+    $("left").textContent = s === 0 ? "ended" : `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`;
+    $("claimable").textContent = fmt(cl);
+    $("claim").disabled = cl === 0n;
+    $("finalize").disabled = s !== 0;
+
+    const rows = lb.filter(e => e.player !== ethers.ZeroAddress);
+    $("lb").innerHTML = rows.length
+      ? rows.map((e,i) => `<tr class="${e.player.toLowerCase()===account.toLowerCase()?'me':''}">
+          <td>${i+1}</td><td>${short(e.player)}</td><td class="score">${e.score}</td></tr>`).join("")
+      : `<tr><td colspan="3" style="color:var(--muted)">no scores yet — be first</td></tr>`;
+  }catch(e){ showErr("Read failed: " + (e.shortMessage || e.message)); }
+}
+
+// ----------------------------------------------------------------- the runner
+const cv = $("cv"), ctx = cv.getContext("2d");
+const W = cv.width, H = cv.height, GROUND = H - 48;
+
+let game = null;
+
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function newGame(seedHex, runId){
+  const seedInt = parseInt(seedHex.slice(2, 10), 16);
+  return {
+    runId, rnd: mulberry32(seedInt),
+    frame: 0, score: 0, speed: 5.2, alive: true,
+    y: GROUND, vy: 0, jumps: [], obstacles: [], nextSpawn: 70
+  };
+}
+
+function jump(){
+  if(!game || !game.alive) return;
+  if(game.y >= GROUND - 0.5){
+    game.vy = -12.4;
+    if(game.jumps.length < 512) game.jumps.push(game.frame);
+  }
+}
+
+function step(){
+  if(!game || !game.alive) return;
+  const g = game;
+  g.frame++;
+  g.speed = 5.2 + Math.min(4.6, g.frame / 900);
+
+  g.vy += 0.62;
+  g.y += g.vy;
+  if(g.y > GROUND){ g.y = GROUND; g.vy = 0; }
+
+  if(--g.nextSpawn <= 0){
+    const tall = g.rnd() > 0.72;
+    g.obstacles.push({ x: W + 20, w: tall ? 18 : 24, h: tall ? 48 : 30 });
+    g.nextSpawn = Math.floor(58 + g.rnd() * 60 - Math.min(18, g.frame / 220));
+  }
+
+  for(const o of g.obstacles) o.x -= g.speed;
+
+  const px = 90, pw = 26, ph = 30;
+  for(const o of g.obstacles){
+    if(o.x < px + pw && o.x + o.w > px && g.y > GROUND - o.h){ g.alive = false; }
+    if(!o.passed && o.x + o.w < px){ o.passed = true; g.score++; }
+  }
+  g.obstacles = g.obstacles.filter(o => o.x > -60);
+
+  if(!g.alive) endRun();
+}
+
+function draw(){
+  ctx.fillStyle = "#07060D"; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle = "#2A2638"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, GROUND + 14); ctx.lineTo(W, GROUND + 14); ctx.stroke();
+
+  if(game){
+    ctx.fillStyle = "#7C5CFF";
+    ctx.fillRect(90, game.y - 30, 26, 30);
+    ctx.fillStyle = "#F2F1F5";
+    ctx.fillRect(108, game.y - 24, 5, 5);
+    ctx.fillStyle = "#4A3A9E";
+    for(const o of game.obstacles) ctx.fillRect(o.x, GROUND - o.h, o.w, o.h);
+
+    ctx.fillStyle = "#F2F1F5";
+    ctx.font = "700 20px ui-monospace, monospace";
+    ctx.fillText(String(game.score).padStart(4,"0"), W - 76, 34);
+  }
+  requestAnimationFrame(draw);
+}
+setInterval(step, 1000/60);
+draw();
+
+// ------------------------------------------------------------------- the flow
+async function payAndPlay(){
+  if(!contract) return connect();
+  showErr("");
+  $("ovTitle").textContent = "Confirm in wallet…";
+  $("ovText").textContent = "Paying the entry fee. The level is generated from the transaction, so every run is different.";
+  $("ovBtn").disabled = true;
+  try{
+    const fee = await contract.entryFee();
+    const tx = await contract.startRun({ value: fee });
+    $("ovTitle").textContent = "Starting…";
+    const rc = await tx.wait();
+
+    let runId, seed;
+    for(const log of rc.logs){
+      try{
+        const parsed = contract.interface.parseLog(log);
+        if(parsed && parsed.name === "RunStarted"){ runId = parsed.args[0]; seed = parsed.args[3]; }
+      }catch(_){}
+    }
+    if(!runId){ throw new Error("RunStarted event not found"); }
+
+    game = newGame(seed, runId);
+    $("ov").classList.add("hidden");
+    await refresh();
+  }catch(e){
+    showErr(e.shortMessage || e.message);
+    $("ovTitle").textContent = "Ink Runner";
+    $("ovText").textContent = "Pay the entry fee and run. Space or tap to jump.";
+    $("ovBtn").disabled = false;
+  }
+}
+
+async function endRun(){
+  const g = game;
+  $("ov").classList.remove("hidden");
+  $("ovTitle").textContent = `Score ${g.score}`;
+  $("ovText").textContent = `${g.jumps.length} jumps. Submitting them onchain — confirm in your wallet.`;
+  $("ovBtn").disabled = true;
+  try{
+    const tx = await contract.submitScore(g.runId, g.score, g.jumps);
+    await tx.wait();
+    $("ovText").textContent = `Score ${g.score} is onchain, with all ${g.jumps.length} jumps in the log.`;
+  }catch(e){
+    showErr(e.shortMessage || e.message);
+    $("ovText").textContent = "Score was not submitted. You can retry from the console, or just run again.";
+  }
+  $("ovBtn").disabled = false;
+  $("ovBtn").textContent = "Run again";
+  game = null;
+  await refresh();
+}
+
+// ------------------------------------------------------------------- bindings
+$("connect").onclick = connect;
+$("play").onclick = payAndPlay;
+$("ovBtn").onclick = () => (contract ? payAndPlay() : connect());
+$("claim").onclick = async () => {
+  try{ const tx = await contract.claim(); await tx.wait(); await refresh(); }
+  catch(e){ showErr(e.shortMessage || e.message); }
+};
+$("finalize").onclick = async () => {
+  try{ const tx = await contract.finalizeRound(); await tx.wait(); await refresh(); }
+  catch(e){ showErr(e.shortMessage || e.message); }
+};
+
+addEventListener("keydown", (e) => {
+  if(e.code === "Space" || e.code === "ArrowUp"){ e.preventDefault(); jump(); }
+});
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); jump(); });
+</script>
+</body>
+</html>
