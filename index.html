@@ -104,7 +104,7 @@
 <script>
 // ----------------------------------------------------------------- chain setup
 const CHAIN_ID_HEX = "0xdef1";                 // 57073
-const CONTRACT = "0xeD70C59709334A8594325A72A773EBb75Dc42184";    // <-- paste after deploying
+const CONTRACT = "0xYOUR_CONTRACT_ADDRESS";    // <-- paste after deploying
 const RPC = "https://rpc-gel.inkonchain.com";
 const EXPLORER = "https://explorer.inkonchain.com";
 
@@ -224,7 +224,8 @@ function step(){
   if(!game || !game.alive) return;
   const g = game;
   g.frame++;
-  g.speed = 5.2 + Math.min(4.6, g.frame / 900);
+  // ramps from 5.0 to 13.0 over roughly 80 seconds, like the original
+  g.speed = 5.0 + Math.min(8.0, g.frame * 0.0016);
 
   g.vy += 0.62;
   g.y += g.vy;
@@ -233,7 +234,8 @@ function step(){
   if(--g.nextSpawn <= 0){
     const tall = g.rnd() > 0.72;
     g.obstacles.push({ x: W + 20, w: tall ? 18 : 24, h: tall ? 48 : 30 });
-    g.nextSpawn = Math.floor(58 + g.rnd() * 60 - Math.min(18, g.frame / 220));
+    // gaps shrink as the run goes on, but never below one full jump arc
+    g.nextSpawn = Math.max(48, Math.floor(72 + g.rnd() * 58 - g.frame / 300));
   }
 
   for(const o of g.obstacles) o.x -= g.speed;
