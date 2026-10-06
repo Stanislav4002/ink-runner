@@ -69,6 +69,8 @@
     <div>round <b id="round">—</b></div>
     <div>ends in <b id="left">—</b></div>
     <div>you can claim <b id="claimable">—</b></div>
+    <div style="margin-left:auto">your points <b id="mine">—</b></div>
+    <div>rank <b id="rank">—</b></div>
   </div>
 
   <div class="stage">
@@ -94,7 +96,7 @@
   </div>
 
   <p class="note">
-    The whole pot is split between the top 10 of each round: 30 / 20 / 12 / 10 / 8 / 6 / 5 / 4 / 3 / 2 percent.
+    Points add up across every run you pay for. The whole pot is split between the ten highest totals: 30 / 20 / 12 / 10 / 8 / 6 / 5 / 4 / 3 / 2 percent. Totals reset when the round is finalized.
     Nothing is taken out for the house. Anyone can call Finalize once the round timer hits zero.
     Scores are submitted by the client, so treat this as a toy, not a tournament.
   </p>
@@ -104,7 +106,7 @@
 <script>
 // ----------------------------------------------------------------- chain setup
 const CHAIN_ID_HEX = "0xdef1";                 // 57073
-const CONTRACT = "0xeD70C59709334A8594325A72A773EBb75Dc42184";
+const CONTRACT = "0x0106101425653462863edfCe7e4EF67a8B4C5410";
 const RPC = "https://rpc-gel.inkonchain.com";
 const EXPLORER = "https://explorer.inkonchain.com";
 
@@ -114,7 +116,10 @@ const ABI = [
   "function roundId() view returns (uint256)",
   "function timeLeft() view returns (uint256)",
   "function claimable(address) view returns (uint256)",
-  "function getLeaderboard() view returns (tuple(address player,uint32 score,uint256 runId)[10])",
+  "function totalOf(address) view returns (uint32)",
+  "function rankOf(address) view returns (uint256,uint256)",
+  "function lifetimePoints(address) view returns (uint32)",
+  "function getLeaderboard() view returns (tuple(address player,uint32 total)[10])",
   "function startRun() payable returns (uint256,bytes32)",
   "function submitScore(uint256 runId, uint32 score, uint16[] jumps)",
   "function claim()",
@@ -167,9 +172,10 @@ async function connect(){
 async function refresh(){
   if(!readContract) return;
   try{
-    const [fee, pot, round, left, cl, lb] = await Promise.all([
+    const [fee, pot, round, left, cl, lb, mine, rk] = await Promise.all([
       readContract.entryFee(), readContract.pot(), readContract.roundId(),
-      readContract.timeLeft(), readContract.claimable(account), readContract.getLeaderboard()
+      readContract.timeLeft(), readContract.claimable(account), readContract.getLeaderboard(),
+      readContract.totalOf(account), readContract.rankOf(account)
     ]);
     $("fee").textContent = fmt(fee);
     $("pot").textContent = fmt(pot);
@@ -177,13 +183,15 @@ async function refresh(){
     const s = Number(left);
     $("left").textContent = s === 0 ? "ended" : `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`;
     $("claimable").textContent = fmt(cl);
+    $("mine").textContent = mine.toString();
+    $("rank").textContent = rk[0] === 0n ? `— of ${rk[1]}` : `${rk[0]} of ${rk[1]}`;
     $("claim").disabled = cl === 0n;
     $("finalize").disabled = s !== 0;
 
     const rows = lb.filter(e => e.player !== ethers.ZeroAddress);
     $("lb").innerHTML = rows.length
       ? rows.map((e,i) => `<tr class="${e.player.toLowerCase()===account.toLowerCase()?'me':''}">
-          <td>${i+1}</td><td>${short(e.player)}</td><td class="score">${e.score}</td></tr>`).join("")
+          <td>${i+1}</td><td>${short(e.player)}</td><td class="score">${e.total}</td></tr>`).join("")
       : `<tr><td colspan="3" style="color:var(--muted)">no scores yet — be first</td></tr>`;
   }catch(e){ showErr("Read failed: " + (e.shortMessage || e.message)); }
 }
@@ -224,8 +232,10 @@ function step(){
   if(!game || !game.alive) return;
   const g = game;
   g.frame++;
-  // ramps from 5.0 to 13.0 over roughly 80 seconds, like the original
-  g.speed = 5.0 + Math.min(8.0, g.frame * 0.0016);
+  // hard ramp for the first 50 seconds, then a slow climb that never stops
+  g.speed = g.frame < 3000
+    ? 5.2 + g.frame * 0.0034
+    : 15.4 + (g.frame - 3000) * 0.0008;
 
   g.vy += 0.62;
   g.y += g.vy;
@@ -332,7 +342,8 @@ async function endRun(){
   try{
     const tx = await contract.submitScore(g.runId, g.score, g.jumps);
     await tx.wait();
-    $("ovText").textContent = `Score ${g.score} is onchain, with all ${g.jumps.length} jumps in the log.`;
+    const mine = await contract.totalOf(account);
+    $("ovText").textContent = `+${g.score} points. Round total ${mine}. All ${g.jumps.length} jumps are in the log.`;
   }catch(e){
     showErr(e.shortMessage || e.message);
     $("ovText").textContent = "Score was not submitted. You can retry from the console, or just run again.";
