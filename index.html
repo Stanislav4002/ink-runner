@@ -232,10 +232,24 @@ function step(){
   if(g.y > GROUND){ g.y = GROUND; g.vy = 0; }
 
   if(--g.nextSpawn <= 0){
-    const tall = g.rnd() > 0.72;
-    g.obstacles.push({ x: W + 20, w: tall ? 18 : 24, h: tall ? 48 : 30 });
-    // gaps shrink as the run goes on, but never below one full jump arc
-    g.nextSpawn = Math.max(48, Math.floor(72 + g.rnd() * 58 - g.frame / 300));
+    // clusters get more common the longer you survive
+    const t = Math.min(1, g.frame / 5400);
+    const p1 = 0.80 - 0.35 * t;     // chance of a single obstacle: 80% -> 45%
+    const p2 = 0.17 + 0.18 * t;     // chance of a pair:            17% -> 35%
+    const r = g.rnd();
+    const n = r < p1 ? 1 : (r < p1 + p2 ? 2 : 3);
+
+    const tall = n === 1 && g.rnd() < 0.28;
+    const partW = tall ? 16 : 20;
+    const h = tall ? 46 : 30;
+    const innerGap = 4;
+    const w = n * partW + (n - 1) * innerGap;
+
+    g.obstacles.push({ x: W + 20, w, h, n, partW, innerGap });
+    // gaps shrink as the run goes on, but never below one full jump arc,
+    // and wider clusters buy back the room they take up
+    g.nextSpawn = Math.max(48, Math.floor(72 + g.rnd() * 58 - g.frame / 300))
+                + Math.ceil(w / g.speed);
   }
 
   for(const o of g.obstacles) o.x -= g.speed;
@@ -261,7 +275,11 @@ function draw(){
     ctx.fillStyle = "#F2F1F5";
     ctx.fillRect(108, game.y - 24, 5, 5);
     ctx.fillStyle = "#4A3A9E";
-    for(const o of game.obstacles) ctx.fillRect(o.x, GROUND - o.h, o.w, o.h);
+    for(const o of game.obstacles){
+      for(let i = 0; i < o.n; i++){
+        ctx.fillRect(o.x + i * (o.partW + o.innerGap), GROUND - o.h, o.partW, o.h);
+      }
+    }
 
     ctx.fillStyle = "#F2F1F5";
     ctx.font = "700 20px ui-monospace, monospace";
